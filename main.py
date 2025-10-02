@@ -43,8 +43,10 @@ class Room:
 rooms: Dict[str, Room] = {}
 
 # Debe apuntar al dominio base y a /room, no a /api
+# Asegúrate que sea /room/ (singular)
 def build_room_link(room_id: str) -> str:
     return f"{PUBLIC_BASE_URL}/room/{room_id}"
+
 
 def create_room_id() -> str:
     # short, URL-safe room id
@@ -197,6 +199,13 @@ async def ws_room(websocket: WebSocket, room_id: str):
             rooms.pop(room_id, None)
 
 # ============== Room Page ==============
-@app.get("/rooms/{room_id}", response_class=HTMLResponse)
-async def room_page(room_id: str, request: Request):
-    return templates.TemplateResponse("room.html", {"request": request, "room_id": room_id})
+from fastapi.responses import RedirectResponse
+
+@app.get("/rooms/{room_id}")
+def alias_rooms(room_id: str):
+    # redirige /rooms/{id} -> /room/{id}
+    return RedirectResponse(url=f"/room/{room_id}", status_code=302)
+
+# @app.get("/rooms/{room_id}", response_class=HTMLResponse)
+# async def room_page(room_id: str, request: Request):
+#     return templates.TemplateResponse("room.html", {"request": request, "room_id": room_id})
