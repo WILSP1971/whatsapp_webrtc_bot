@@ -12,11 +12,13 @@
     .wrap { flex: 1; display: grid; gap: 12px; grid-template-columns: 1fr; padding: 12px; }
     @media (min-width: 900px) { .wrap { grid-template-columns: 1fr 1fr; } }
     video { width: 100%; height: auto; background: #111827; border-radius: 16px; aspect-ratio: 16/9; object-fit: cover; }
-    .controls { display: flex; gap: 8px; padding: 12px; justify-content: center; background: #0f172a; }
+    .controls { display: flex; gap: 8px; padding: 12px; justify-content: center; background: #0f172a; flex-wrap: wrap; }
     button { border: 0; padding: 10px 14px; border-radius: 999px; cursor: pointer; font-weight: 600; }
     .danger { background: #ef4444; color: white; }
     .muted { background: #334155; color: #e5e7eb; }
     .hint { text-align: center; padding: 8px 16px; color: #cbd5e1; font-size: 14px; }
+    .status { text-align:center; font-size:12px; color:#93c5fd; padding:6px 12px; }
+    .error  { color:#fecaca; }
   </style>
 </head>
 <body>
@@ -30,14 +32,18 @@
     <video id="remoteVideo" autoplay playsinline></video>
   </div>
 
+  <div class="status" id="status">Inicializando…</div>
+
   <div class="controls">
+    <button id="btnRetryCam" class="muted">Reintentar cámara</button>
     <button id="btnToggleCam" class="muted">Cam ON/OFF</button>
     <button id="btnToggleMic" class="muted">Mic ON/OFF</button>
     <button id="btnLeave" class="danger">Salir</button>
   </div>
 
   <div class="hint">
-    Si no ves video del otro lado después de unos segundos, recarguen la página ambos. En redes estrictas necesitarás un <b>TURN server</b> propio.
+    • Abre este enlace en <b>Chrome/Safari</b>, no dentro de WhatsApp.<br/>
+    • Si no ves video del otro lado, probablemente necesitas un <b>TURN server</b>.
   </div>
 
   <script>
@@ -45,10 +51,10 @@
     const params = new URLSearchParams(location.search);
     const token = params.get('t') || '';
     const wsProto = (location.protocol === 'https:') ? 'wss' : 'ws';
-    const basePrefix = "{{ base_prefix|default('') }}";  // Jinja2: si no viene, vacío
+    const basePrefix = "{{ base_prefix|default('') }}";  // si no viene, queda vacío
 
-    // WebSocket de señalización (con prefijo si existe)
-    const ws = new WebSocket(`${wsProto}://${location.host}${basePrefix}/ws/${roomId}${token ? `?t=${encodeURIComponent(token)}` : ''}`);
+    const statusEl = document.getElementById('status');
+    function setStatus(s, isErr=false){ statusEl.textContent = s; statusEl.className = isErr ? 'status error' : 'status'; console.log('[status]', s); }
 
     let pc;
     let localStream;
@@ -59,59 +65,106 @@
     const btnToggleCam = document.getElementById('btnToggleCam');
     const btnToggleMic = document.getElementById('btnToggleMic');
     const btnLeave = document.getElementById('btnLeave');
+    const btnRetryCam = document.getElementById('btnRetryCam');
 
-    btnLeave.onclick = () => { if (pc) pc.close(); ws.close(); window.location.href = '/'; };
+    btnLeave.onclick = () => { if (pc) pc.close(); try{ ws.close(); }catch{} window.location.href = '/'; };
     btnToggleCam.onclick = () => { if (!localStream) return; localStream.getVideoTracks().forEach(t => t.enabled = !t.enabled); };
     btnToggleMic.onclick = () => { if (!localStream) return; localStream.getAudioTracks().forEach(t => t.enabled = !t.enabled); };
+    btnRetryCam.onclick = () => startMedia(true);
 
-    async function startMedia() {
+    async function startMedia(forceLog=false) {
       try {
+        setStatus('Solicitando acceso a cámara/mic…');
         localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         localVideo.srcObject = localStream;
+        setStatus('Cámara OK. Esperando conexión…');
       } catch (e) {
-        alert("No se pudo acceder a cámara/micrófono: " + e.message);
+        setStatus('No se pudo acceder a cámara/mic: ' + e.message, true);
+        alert("Permite el acceso a cámara/mic. Si estás en el webview de WhatsApp, abre en el navegador del sistema.");
+        if(forceLog) console.error(e);
       }
     }
 
     function newPeer() {
       pc = new RTCPeerConnection({ iceServers });
-      pc.onicecandidate = (event) => { if (event.candidate) ws.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate })); };
-      pc.ontrack = (event) => { if (remoteVideo.srcObject !== event.streams[0]) remoteVideo.srcObject = event.streams[0]; };
-      if (localStream) localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          try { ws.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate })); }
+          catch (e) { console.warn('WS send candidate failed', e); }
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        setStatus('Estado RTCPeerConnection: ' + pc.connectionState + (pc.iceConnectionState ? ` / ICE: ${pc.iceConnectionState}` : ''));
+      };
+      pc.oniceconnectionstatechange = () => {
+        setStatus('ICE: ' + pc.iceConnectionState);
+      };
+      pc.ontrack = (event) => {
+        if (remoteVideo.srcObject !== event.streams[0]) {
+          remoteVideo.srcObject = event.streams[0];
+        }
+      };
+      if (localStream) {
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      }
     }
 
     async function makeOffer() {
-      const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
       ws.send(JSON.stringify({ type: 'offer', sdp: offer }));
     }
     async function makeAnswer(offer) {
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
       ws.send(JSON.stringify({ type: 'answer', sdp: answer }));
     }
 
-    ws.onmessage = async (ev) => {
-      const data = JSON.parse(ev.data);
-      if (data.type === 'role') {
-        iceServers = data.iceServers || iceServers;
-        await startMedia(); newPeer();
-      } else if (data.type === 'ready') {
-        if (pc && pc.signalingState === 'stable') await makeOffer();
-      } else if (data.type === 'offer') {
-        await makeAnswer(data.sdp);
-      } else if (data.type === 'answer') {
-        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      } else if (data.type === 'ice-candidate') {
-        try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn('ICE add failed', e); }
-      } else if (data.type === 'full') {
-        alert('La sala está llena.');
-      } else if (data.type === 'error') {
-        alert(data.message || 'Error en señalización.');
-      }
-    };
+    // 1) Pide cámara inmediatamente (sin esperar al WS)
+    startMedia();
 
-    ws.onclose = () => { if (pc) pc.close(); };
+    // 2) Conecta WebSocket
+    let ws;
+    try {
+      const wsUrl = `${wsProto}://${location.host}${basePrefix}/ws/${roomId}${token ? `?t=${encodeURIComponent(token)}` : ''}`;
+      setStatus('Conectando señalización…');
+      ws = new WebSocket(wsUrl);
+    } catch(e) {
+      setStatus('No se pudo abrir WebSocket (revisa firewall/red).', true);
+      console.error(e);
+    }
+
+    if (ws){
+      ws.onopen = () => setStatus('Señalización conectada. Esperando a la otra persona…');
+      ws.onerror = (e) => { setStatus('Error de WebSocket (revisa firewall y que el puerto 443 permita WS).', true); console.error(e); };
+      ws.onclose = () => setStatus('Señalización cerrada.', true);
+
+      ws.onmessage = async (ev) => {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'role') {
+          if (data.iceServers) iceServers = data.iceServers;
+          if (!localStream) await startMedia();
+          newPeer();
+        } else if (data.type === 'ready') {
+          if (pc && pc.signalingState === 'stable') await makeOffer();
+        } else if (data.type === 'offer') {
+          await makeAnswer(data.sdp);
+        } else if (data.type === 'answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        } else if (data.type === 'ice-candidate') {
+          try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn('ICE add failed', e); }
+        } else if (data.type === 'full') {
+          setStatus('La sala está llena (máx 2).', true);
+          alert('La sala está llena.');
+        } else if (data.type === 'error') {
+          setStatus(data.message || 'Error en señalización.', true);
+          alert(data.message || 'Error en señalización.');
+        }
+      };
+    }
   </script>
 </body>
 </html>
+
 
