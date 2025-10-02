@@ -24,7 +24,7 @@ templates = Jinja2Templates(directory="templates")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "TWSCodeJG#75")
 WABA_PHONE_NUMBER_ID = os.getenv("WABA_PHONE_NUMBER_ID", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://appsintranet.esculapiosis.com/ApiCampbell/api")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://appsintranet.esculapiosis.com")
 DEFAULT_CALLEE_PHONE = os.getenv("DEFAULT_CALLEE_PHONE", "")
 ICE_SERVERS_JSON = os.getenv("ICE_SERVERS_JSON", '[{"urls":"stun:stun.l.google.com:19302"}]')
 
