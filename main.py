@@ -42,6 +42,10 @@ class Room:
 
 rooms: Dict[str, Room] = {}
 
+# Debe apuntar al dominio base y a /room, no a /api
+def build_room_link(room_id: str) -> str:
+    return f"{PUBLIC_BASE_URL}/room/{room_id}"
+
 def create_room_id() -> str:
     # short, URL-safe room id
     return secrets.token_urlsafe(6)
