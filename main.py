@@ -32,7 +32,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "CHANGE_ME_VERIFY_TOKEN")
 WABA_PHONE_NUMBER_ID = os.getenv("WABA_PHONE_NUMBER_ID", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://tu-dominio")  # pon tu dominio con https
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://appsintranet.esculapiosis.com")  # pon tu dominio con https
 DEFAULT_CALLEE_PHONE = os.getenv("DEFAULT_CALLEE_PHONE", "")
 ICE_SERVERS_JSON = os.getenv("ICE_SERVERS_JSON", '[{"urls":"stun:stun.l.google.com:19302"}]')
 
@@ -179,7 +179,7 @@ def parse_callee(text: str) -> Optional[str]:
 
 def send_whatsapp_text(to: str, body: str):
     if not WABA_PHONE_NUMBER_ID or not WHATSAPP_TOKEN: return
-    url = f"https://graph.facebook.com/v20.0/{WABA_PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v22.0/{WABA_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type":"application/json"}
     payload = {"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":body}}
     try: requests.post(url, headers=headers, json=payload, timeout=30)
