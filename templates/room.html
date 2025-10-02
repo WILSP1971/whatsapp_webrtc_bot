@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Videollamada</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji'; }
+    body { margin: 0; background: #0b1220; color: #e8eefc; display: flex; flex-direction: column; min-height: 100vh; }
+    header { padding: 12px 16px; background: #0f172a; display: flex; align-items: center; justify-content: space-between; }
+    .room { padding: 0 12px; font-weight: 600; color: #93c5fd; font-size: 14px; }
+    .wrap { flex: 1; display: grid; gap: 12px; grid-template-columns: 1fr; padding: 12px; }
+    @media (min-width: 900px) { .wrap { grid-template-columns: 1fr 1fr; } }
+    video { width: 100%; height: auto; background: #111827; border-radius: 16px; aspect-ratio: 16/9; object-fit: cover; }
+    .controls { display: flex; gap: 8px; padding: 12px; justify-content: center; background: #0f172a; }
+    button { border: 0; padding: 10px 14px; border-radius: 999px; cursor: pointer; font-weight: 600; }
+    .primary { background: #2563eb; color: white; }
+    .danger { background: #ef4444; color: white; }
+    .muted { background: #334155; color: #e5e7eb; }
+    .hint { text-align: center; padding: 8px 16px; color: #cbd5e1; font-size: 14px; }
+    a { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>🔵 WebRTC 1:1</div>
+    <div class="room">Sala: <span id="roomId">{{ room_id }}</span></div>
+  </header>
+  <div class="wrap">
+    <video id="localVideo" autoplay playsinline muted></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+  </div>
+  <div class="controls">
+    <button id="btnToggleCam" class="muted">Cam ON/OFF</button>
+    <button id="btnToggleMic" class="muted">Mic ON/OFF</button>
+    <button id="btnLeave" class="danger">Salir</button>
+  </div>
+  <div class="hint">
+    Si no ves video del otro lado después de unos segundos, recarga la página ambos. En redes estrictas necesitarás un <b>TURN server</b> propio.<br/>
+    Abre esta URL en otro dispositivo para probar en 1:1.
+  </div>
+
+  <script>
+    const roomId = document.getElementById('roomId').textContent;
+    const wsProto = (location.protocol === 'https:') ? 'wss' : 'ws';
+    const ws = new WebSocket(`${wsProto}://${location.host}/ws/${roomId}`);
+
+    let pc;
+    let localStream;
+    let role = 'guest';
+    let iceServers = [{"urls":"stun:stun.l.google.com:19302"}];
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const btnToggleCam = document.getElementById('btnToggleCam');
+    const btnToggleMic = document.getElementById('btnToggleMic');
+    const btnLeave = document.getElementById('btnLeave');
+
+    btnLeave.onclick = () => {
+      if (pc) pc.close();
+      ws.close();
+      window.location.href = '/';
+    };
+
+    btnToggleCam.onclick = () => {
+      if (!localStream) return;
+      localStream.getVideoTracks().forEach(t => t.enabled = !t.enabled);
+    };
+    btnToggleMic.onclick = () => {
+      if (!localStream) return;
+      localStream.getAudioTracks().forEach(t => t.enabled = !t.enabled);
+    };
+
+    function newPeer() {
+      pc = new RTCPeerConnection({ iceServers });
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          ws.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate }));
+        }
+      };
+      pc.ontrack = (event) => {
+        if (remoteVideo.srcObject !== event.streams[0]) {
+          remoteVideo.srcObject = event.streams[0];
+        }
+      };
+      if (localStream) {
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      }
+    }
+
+    async function startMedia() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+      } catch (e) {
+        alert("No se pudo acceder a cámara/micrófono: " + e.message);
+      }
+    }
+
+    async function makeOffer() {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: 'offer', sdp: offer }));
+    }
+    async function makeAnswer(offer) {
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: 'answer', sdp: answer }));
+    }
+
+    ws.onmessage = async (ev) => {
+      const data = JSON.parse(ev.data);
+      if (data.type === 'role') {
+        role = data.role || 'guest';
+        iceServers = data.iceServers || iceServers;
+        await startMedia();
+        newPeer();
+      } else if (data.type === 'ready') {
+        if (role === 'caller') {
+          await makeOffer();
+        }
+      } else if (data.type === 'offer') {
+        await makeAnswer(data.sdp);
+      } else if (data.type === 'answer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      } else if (data.type === 'ice-candidate') {
+        try {
+          await pc.addIceCandidate(data.candidate);
+        } catch (e) {
+          console.warn('Failed to add ICE candidate', e);
+        }
+      } else if (data.type === 'full') {
+        alert('La sala está llena.');
+      }
+    };
+
+    ws.onclose = () => {
+      if (pc) pc.close();
+    };
+  </script>
+</body>
+</html>
