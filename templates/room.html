@@ -41,9 +41,17 @@
   </div>
 
   <script>
-    const roomId = document.getElementById('roomId').textContent;
+      const roomId = document.getElementById('roomId').textContent;
+      const params = new URLSearchParams(location.search);
+      const token = params.get('t') || '';
+      const wsProto = (location.protocol === 'https:') ? 'wss' : 'ws';
+      const basePrefix = "{{ base_prefix }}"; // viene del servidor
+
+      const ws = new WebSocket(`${wsProto}://${location.host}${basePrefix}/ws/${roomId}?t=${encodeURIComponent(token)}`);
+
+    {% comment %} const roomId = document.getElementById('roomId').textContent;
     const wsProto = (location.protocol === 'https:') ? 'wss' : 'ws';
-    const ws = new WebSocket(`${wsProto}://${location.host}/ws/${roomId}`);
+    const ws = new WebSocket(`${wsProto}://${location.host}/ws/${roomId}`); {% endcomment %}
 
     let pc;
     let localStream;
