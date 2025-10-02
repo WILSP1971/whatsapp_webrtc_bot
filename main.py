@@ -1,38 +1,30 @@
-import os, json, secrets, re
-from datetime import datetime, timedelta
+
+import os
+import json
+import secrets
+import re
 from typing import Dict, List, Optional
-from pathlib import Path
 
 import requests
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, Query
-from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Prefijo bajo el que publicas la app (tu ejemplo: /ApiCampbell) ---
-BASE_PREFIX = "/ApiCampbell"
+app = FastAPI(title="WhatsApp → WebRTC Videocall")
 
-# --- Paths base (Render usa /opt/render/project/src) ---
-BASE_DIR = Path(__file__).parent
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATES_DIR = BASE_DIR / "templates"
-STATIC_DIR.mkdir(parents=True, exist_ok=True)
-TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+# Static & templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
-app = FastAPI(title="Rooms API + WebRTC (con prefijo)")
-
-app.mount(f"{BASE_PREFIX}/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-
-# --- ENV ---
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "CHANGE_ME_VERIFY_TOKEN")
+# Env config
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "TWSCodeJG#75")
 WABA_PHONE_NUMBER_ID = os.getenv("WABA_PHONE_NUMBER_ID", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://appsintranet.esculapiosis.com")  # pon tu dominio con https
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://appsintranet.esculapiosis.com/ApiCampbell/api")
 DEFAULT_CALLEE_PHONE = os.getenv("DEFAULT_CALLEE_PHONE", "")
 ICE_SERVERS_JSON = os.getenv("ICE_SERVERS_JSON", '[{"urls":"stun:stun.l.google.com:19302"}]')
 
@@ -41,180 +33,166 @@ try:
 except Exception:
     ICE_SERVERS = [{"urls": "stun:stun.l.google.com:19302"}]
 
-# --------- MODELOS ---------
-class CreateRoomBody(BaseModel):
-    caller: str
-    callee: str
-    ttl_minutes: int = 60
-
-class CreateRoomResponse(BaseModel):
-    room_id: str
-    caller_url: str
-    callee_url: str
-    expires_at: str
-
-class RoomInfo(BaseModel):
-    room_id: str
-    participants: List[str]
-    expires_at: str
-    connected: int
-
-# --------- STORAGE (memoria; en prod usa Redis) ---------
+# In-memory room storage (demo only)
 class Room:
-    def __init__(self, caller: str, callee: str, ttl_minutes: int) -> None:
-        self.created_at = datetime.utcnow()
-        self.expires_at = self.created_at + timedelta(minutes=ttl_minutes)
-        self.participants = [caller, callee]
-        self.tokens: Dict[str, str] = {caller: secrets.token_urlsafe(16), callee: secrets.token_urlsafe(16)}
-        self.clients: Dict[str, WebSocket] = {}  # token -> WebSocket
-
-    def is_expired(self) -> bool:
-        return datetime.utcnow() > self.expires_at
+    def __init__(self) -> None:
+        self.clients: List[WebSocket] = []
+    def is_full(self) -> bool:
+        return len(self.clients) >= 2
 
 rooms: Dict[str, Room] = {}
 
-def normalize_e164(s: str) -> str:
-    s = s.replace(" ", "")
-    return s if s.startswith("+") else f"+{s}"
+def create_room_id() -> str:
+    # short, URL-safe room id
+    return secrets.token_urlsafe(6)
 
-def build_room_link(room_id: str, token: str) -> str:
-    # Incluimos el prefijo para que el link quede como https://dominio/ApiCampbell/room/ABC?t=TOKEN
-    return f"{PUBLIC_BASE_URL}{BASE_PREFIX}/room/{room_id}?t={token}"
+def build_room_link(room_id: str) -> str:
+    return f"{PUBLIC_BASE_URL}/rooms/{room_id}"
 
-def create_room(caller: str, callee: str, ttl_minutes: int):
-    caller = normalize_e164(caller)
-    callee = normalize_e164(callee)
-    room_id = secrets.token_urlsafe(6)
-    room = Room(caller, callee, ttl_minutes)
-    rooms[room_id] = room
-    return (
-        room_id,
-        build_room_link(room_id, room.tokens[caller]),
-        build_room_link(room_id, room.tokens[callee]),
-        room.expires_at,
-    )
+# WhatsApp API helpers
+def send_whatsapp_text(to_e164: str, body: str) -> requests.Response:
+    """
+    Send a WhatsApp text message via Cloud API
+    """
+    if not WABA_PHONE_NUMBER_ID or not WHATSAPP_TOKEN:
+        print("⚠️ Missing WABA_PHONE_NUMBER_ID or WHATSAPP_TOKEN")
+    url = f"https://graph.facebook.com/v22.0/{WABA_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_e164,
+        "type": "text",
+        "text": {"body": body}
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    try:
+        print("WhatsApp send resp:", resp.status_code, resp.text[:500])
+    except Exception:
+        pass
+    return resp
 
-# --------- API REST ---------
-@app.post(f"{BASE_PREFIX}/api/rooms", response_model=CreateRoomResponse)
-def api_create_room(body: CreateRoomBody):
-    room_id, caller_url, callee_url, exp = create_room(body.caller, body.callee, body.ttl_minutes)
-    return CreateRoomResponse(room_id=room_id, caller_url=caller_url, callee_url=callee_url, expires_at=exp.isoformat()+"Z")
+def parse_callee(text: str) -> Optional[str]:
+    """
+    Extract E.164 phone number from a text like 'videollamada +573001234567' or 'video 573001234567'
+    """
+    # remove spaces except leading +
+    match = re.search(r"(\+?\d{8,15})", text.replace(" ", ""))
+    if match:
+        num = match.group(1)
+        # normalize: ensure starts with + if not present (you may adapt for your country)
+        if not num.startswith("+"):
+            num = "+" + num
+        return num
+    return None
 
-@app.get(f"{BASE_PREFIX}/api/rooms/{{room_id}}", response_model=RoomInfo)
-def api_room_info(room_id: str):
-    room = rooms.get(room_id)
-    if not room or room.is_expired():
-        raise HTTPException(status_code=404, detail="Room not found or expired")
-    return RoomInfo(room_id=room_id, participants=room.participants, expires_at=room.expires_at.isoformat()+"Z", connected=len(room.clients))
+@app.get("/")
+def root():
+    return {"ok": True, "msg": "WhatsApp → WebRTC Videocall backend running."}
 
-@app.delete(f"{BASE_PREFIX}/api/rooms/{{room_id}}")
-def api_room_delete(room_id: str):
-    room = rooms.pop(room_id, None)
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    for ws in list(room.clients.values()):
-        try:
-            import anyio
-            anyio.from_thread.run(ws.close)
-        except Exception:
-            pass
-    return {"ok": True, "deleted": room_id}
+# ============== WhatsApp Webhook ==============
+@app.get("/webhook")
+async def verify(request: Request):
+    """
+    Meta webhook verification: GET /webhook?hub.mode=subscribe&hub.challenge=...&hub.verify_token=...
+    """
+    params = dict(request.query_params)
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return PlainTextResponse(challenge or "", status_code=200)
+    return PlainTextResponse("Forbidden", status_code=403)
 
-# *** Alias para tus enlaces actuales: /ApiCampbell/api/room/{room_id} ***
-@app.get(f"{BASE_PREFIX}/api/room/{{room_id}}", response_class=HTMLResponse)
-def api_room_alias(room_id: str, request: Request):
-    # Redirige a la página correcta (sin necesidad de token aquí)
-    return RedirectResponse(url=f"{BASE_PREFIX}/room/{room_id}", status_code=302)
+@app.post("/webhook")
+async def incoming(request: Request):
+    """
+    Handle incoming WhatsApp messages. On 'videollamada <phone>' create a room and send link to both users.
+    """
+    data = await request.json()
+    try:
+        entries = data.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                if not messages:
+                    continue
+                for msg in messages:
+                    from_user = msg.get("from")  # E.164 without +
+                    wa_id = f"+{from_user}" if from_user and not from_user.startswith("+") else from_user
+                    text = ""
+                    if msg.get("type") == "text":
+                        text = msg["text"].get("body", "").strip().lower()
+                    # Basic trigger words
+                    if text.startswith("videollamada") or text.startswith("video"):
+                        callee = parse_callee(text) or DEFAULT_CALLEE_PHONE
+                        if not callee:
+                            send_whatsapp_text(wa_id, "Dime a quién invitar: escribe por ejemplo\n`videollamada +573001234567`")
+                            continue
+                        room_id = create_room_id()
+                        link = build_room_link(room_id)
+                        # Inform both parties
+                        send_whatsapp_text(wa_id, f"🎥 Creé tu sala de videollamada:\n{link}\n\nCompártela si deseas.")
+                        if callee != wa_id:
+                            send_whatsapp_text(callee, f"📞 {wa_id} te ha invitado a una videollamada:\n{link}")
+                    else:
+                        # Optional help
+                        send_whatsapp_text(wa_id, "Escribe:\n`videollamada +573001234567`\npara crear una sala y enviar el enlace.")
+        return JSONResponse({"status": "received"})
+    except Exception as e:
+        print("Webhook error:", e)
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=200)
 
-# --------- Página HTML ---------
-@app.get(f"{BASE_PREFIX}/room/{{room_id}}", response_class=HTMLResponse)
-def room_page(room_id: str, request: Request):
-    room = rooms.get(room_id)
-    if not room or room.is_expired():
-        return HTMLResponse("<h1>Sala no existe o expirada</h1>", status_code=404)
-    # pasamos base_prefix para que el JS arme bien la URL del WS
-    return templates.TemplateResponse("room.html", {"request": request, "room_id": room_id, "base_prefix": BASE_PREFIX})
-
-# --------- WebSocket de señalización ---------
-@app.websocket(f"{BASE_PREFIX}/ws/{{room_id}}")
-async def ws_room(websocket: WebSocket, room_id: str, t: Optional[str] = Query(default=None)):
-    room = rooms.get(room_id)
+# ============== WebRTC Signaling (WebSocket) ==============
+@app.websocket("/ws/{room_id}")
+async def ws_room(websocket: WebSocket, room_id: str):
     await websocket.accept()
-    if not room or room.is_expired():
-        await websocket.send_json({"type": "error", "message": "Room not found or expired"})
-        await websocket.close(); return
-    if not t or t not in room.tokens.values():
-        await websocket.send_json({"type": "error", "message": "Invalid token"})
-        await websocket.close(); return
+    room = rooms.get(room_id)
+    if room is None:
+        room = Room()
+        rooms[room_id] = room
 
-    if len(room.clients) >= 2 and t not in room.clients:
+    if room.is_full():
         await websocket.send_json({"type": "full", "message": "Room is full"})
-        await websocket.close(); return
+        await websocket.close()
+        return
 
-    room.clients[t] = websocket
+    room.clients.append(websocket)
     role = "caller" if len(room.clients) == 1 else "callee"
     await websocket.send_json({"type": "role", "role": role, "iceServers": ICE_SERVERS})
+
+    # If room now has 2, notify both ready
     if len(room.clients) == 2:
-        for ws in list(room.clients.values()):
-            try: await ws.send_json({"type": "ready"})
-            except Exception: pass
+        for ws in room.clients:
+            try:
+                await ws.send_json({"type": "ready"})
+            except Exception:
+                pass
 
     try:
         while True:
             msg = await websocket.receive_text()
-            for tok, ws in list(room.clients.items()):
-                if tok != t:
+            # Broadcast to the other peer
+            for ws in list(room.clients):
+                if ws is not websocket:
                     await ws.send_text(msg)
     except WebSocketDisconnect:
         pass
     finally:
-        room.clients.pop(t, None)
-        if not room.clients and room.is_expired():
+        # Remove and cleanup
+        try:
+            room.clients.remove(websocket)
+        except ValueError:
+            pass
+        if not room.clients:
+            # Delete empty room to free memory
             rooms.pop(room_id, None)
 
-# --------- Opcional: webhook de WhatsApp para crear salas desde el chat ---------
-def parse_callee(text: str) -> Optional[str]:
-    m = re.search(r"(\+?\d{8,15})", text.replace(" ", ""))
-    return normalize_e164(m.group(1)) if m else None
-
-def send_whatsapp_text(to: str, body: str):
-    if not WABA_PHONE_NUMBER_ID or not WHATSAPP_TOKEN: return
-    url = f"https://graph.facebook.com/v22.0/{WABA_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type":"application/json"}
-    payload = {"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":body}}
-    try: requests.post(url, headers=headers, json=payload, timeout=30)
-    except Exception: pass
-
-@app.get(f"{BASE_PREFIX}/webhook")
-def verify(request: Request):
-    p = dict(request.query_params)
-    if p.get("hub.mode")=="subscribe" and p.get("hub.verify_token")==VERIFY_TOKEN:
-        return PlainTextResponse(p.get("hub.challenge",""), status_code=200)
-    return PlainTextResponse("Forbidden", status_code=403)
-
-@app.post(f"{BASE_PREFIX}/webhook")
-async def incoming(request: Request):
-    data = await request.json()
-    try:
-        for entry in data.get("entry", []):
-            for change in entry.get("changes", []):
-                value = change.get("value", {})
-                for msg in value.get("messages", []):
-                    wa_id = normalize_e164(msg.get("from",""))
-                    text = msg.get("text",{}).get("body","").lower().strip() if msg.get("type")=="text" else ""
-                    if text.startswith("videollamada") or text.startswith("video"):
-                        callee = parse_callee(text) or DEFAULT_CALLEE_PHONE
-                        if not callee:
-                            send_whatsapp_text(wa_id, "Usa: videollamada +573001234567"); continue
-                        room_id, caller_url, callee_url, _ = create_room(wa_id, callee, 60)
-                        send_whatsapp_text(wa_id, f"🎥 Sala: {caller_url}")
-                        if callee != wa_id: send_whatsapp_text(callee, f"📞 {wa_id} te invitó: {callee_url}")
-                    else:
-                        send_whatsapp_text(wa_id, "Usa: videollamada +573001234567")
-        return JSONResponse({"status":"received"})
-    except Exception as e:
-        return JSONResponse({"status":"error","detail":str(e)})
-
-@app.get("/")
-def root():
-    return {"ok": True, "msg": "Rooms API + WebRTC con prefijo", "base_prefix": BASE_PREFIX}
+# ============== Room Page ==============
+@app.get("/rooms/{room_id}", response_class=HTMLResponse)
+async def room_page(room_id: str, request: Request):
+    return templates.TemplateResponse("room.html", {"request": request, "room_id": room_id})
